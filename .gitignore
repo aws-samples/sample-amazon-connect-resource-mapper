@@ -1,0 +1,8 @@
+# Internal files — contain customer-specific data
+internal/
+test-output/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
