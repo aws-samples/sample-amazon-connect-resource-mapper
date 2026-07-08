@@ -264,7 +264,121 @@ Create a policy with these read-only permissions:
 | `--region` | AWS region | `us-east-1` |
 | `--output-dir` | Where to write output files | Current directory |
 | `--skip-flow-content` | Skip detailed flow inspection (faster, but no Lambda mapping) | `false` |
+| `--profile` | AWS CLI profile name | Environment default |
+| `--line-config` | Path to `line-config.json` for the Operations Dashboard | — |
+| `--live-endpoint` | API Gateway URL for real-time CloudWatch refresh | — |
 | `--verbose` / `-v` | Enable debug logging | `false` |
+
+---
+
+## Operations Dashboard
+
+When you provide `--line-config`, the script generates an interactive operations dashboard (`connect-operations-dashboard.html`) that shows:
+
+- **Health strip** — per-line status (green/yellow/red) with call volumes
+- **Hourly chart** — call distribution across the day
+- **Capacity meters** — "you can handle X more calls before degradation"
+- **Flow drill-down** — what happens during each call, API usage per flow
+- **Migration wave planner** — slider to test "what if I add N numbers?"
+
+### Setup: `line-config.json`
+
+The dashboard groups your phone numbers and flows into business lines. You define these in `line-config.json`:
+
+```json
+{
+  "lines": [
+    {
+      "id": "claims",
+      "name": "Claims",
+      "number": "1-800-CLAIMS",
+      "match": {
+        "flow_patterns": ["Claims*", "*FNOL*"],
+        "number_prefixes": ["+1800"],
+        "tags": {"BusinessLine": "Claims"}
+      }
+    }
+  ]
+}
+```
+
+**Matching priority:**
+1. **Tags** — if your Connect flows/numbers have tags, these match first
+2. **Flow name patterns** — glob-style matching against flow names
+3. **Number prefixes** — match phone numbers by prefix
+
+### Option A: Manual Configuration
+
+Edit `line-config.json` to define your lines manually. Use flow name patterns and/or number prefixes:
+
+```bash
+python connect-resource-mapper.py \
+    --instance-id YOUR-ID \
+    --line-config line-config.json \
+    --output-dir ./output
+```
+
+### Option B: Tag-Based Auto-Discovery
+
+If your Connect resources are tagged (e.g., `BusinessLine: Claims`, `BusinessLine: Sales`), the script can auto-discover your lines — no manual config needed.
+
+Set `auto_discover.enabled: true` in `line-config.json`:
+
+```json
+{
+  "auto_discover": {
+    "enabled": true,
+    "tag_key": "BusinessLine",
+    "fallback_line_name": "Other"
+  }
+}
+```
+
+The script will:
+1. Read tags from all contact flows and phone numbers
+2. Group resources by the specified tag key
+3. Auto-generate a line for each unique tag value
+4. Put untagged resources in the "Other" fallback line
+
+**Tagging your Connect resources:**
+
+```bash
+# Tag a contact flow
+aws connect tag-resource \
+    --resource-arn arn:aws:connect:us-east-1:123456789012:instance/INSTANCE-ID/contact-flow/FLOW-ID \
+    --tags BusinessLine=Claims
+
+# Tag a phone number
+aws connect tag-resource \
+    --resource-arn arn:aws:connect:us-east-1:123456789012:phone-number/NUMBER-ID \
+    --tags BusinessLine=Sales
+```
+
+### Without `line-config.json`
+
+If you don't provide `--line-config`, the script still generates the basic quota calculator dashboard (`connect-dashboard.html`). You just won't get the operations view with business lines, hourly charts, and the wave planner.
+
+### Live Refresh (Optional)
+
+Deploy the included Lambda backend for real-time CloudWatch metrics (dashboard auto-refreshes every 60 seconds):
+
+```bash
+cd live-refresh/
+sam build && sam deploy --guided \
+    --parameter-overrides ConnectInstanceId=YOUR-INSTANCE-ID
+```
+
+Then pass the output URL:
+
+```bash
+python connect-resource-mapper.py \
+    --instance-id YOUR-ID \
+    --line-config line-config.json \
+    --live-endpoint https://YOUR-API.execute-api.us-east-1.amazonaws.com/prod/metrics \
+    --output-dir ./output
+```
+
+See [`live-refresh/README.md`](live-refresh/README.md) for full deployment instructions and cost estimate (~$2.50/month).
 
 ## Running Tests
 

@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import importlib.util
 spec = importlib.util.spec_from_file_location(
     "mapper", 
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "connect-resource-mapper.py")
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "connect-resource-mapper.py")
 )
 mapper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mapper)

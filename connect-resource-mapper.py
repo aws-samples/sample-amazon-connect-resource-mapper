@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT-0
 """Amazon Connect Resource Mapper — Quota Impact Model Generator.
 
 Maps the full resource topology of an Amazon Connect instance:
@@ -32,7 +33,7 @@ Usage:
         --region us-east-1 \\
         --output-dir ./output
 
-Author: AWS TAM
+Author: Amazon.com, Inc.
 License: MIT
 """
 
@@ -83,21 +84,23 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def create_clients(region: str) -> dict[str, Any]:
+def create_clients(region: str, profile: str | None = None) -> dict[str, Any]:
     """Create boto3 clients for all required AWS services.
 
     Args:
         region: AWS region name (e.g., 'us-east-1').
+        profile: Optional AWS CLI profile name.
 
     Returns:
         Dictionary mapping service name to boto3 client instance.
     """
+    session = boto3.Session(profile_name=profile, region_name=region)
     return {
-        "connect": boto3.client("connect", region_name=region),
-        "lambda": boto3.client("lambda", region_name=region),
-        "lex": boto3.client("lexv2-models", region_name=region),
-        "servicequotas": boto3.client("service-quotas", region_name=region),
-        "cloudwatch": boto3.client("cloudwatch", region_name=region),
+        "connect": session.client("connect"),
+        "lambda": session.client("lambda"),
+        "lex": session.client("lexv2-models"),
+        "servicequotas": session.client("service-quotas"),
+        "cloudwatch": session.client("cloudwatch"),
     }
 
 
@@ -245,6 +248,9 @@ def collect_contact_flows(
             flow_data = detail.get("ContactFlow", {})
             content = flow_data.get("Content", "{}")
             flow_data["lambdas_invoked"] = extract_lambdas_from_flow(content)
+            flow_data["api_actions"] = extract_api_actions_from_flow(content)
+            # Retrieve tags for line matching
+            flow_data["Tags"] = flow_data.get("Tags", {})
             # Remove raw content to reduce output size.
             flow_data.pop("Content", None)
             detailed_flows.append(flow_data)
@@ -301,6 +307,142 @@ def extract_lambdas_from_flow(content_json: str) -> list[str]:
                 lambdas.append(arn)
 
     return lambdas
+
+
+def extract_api_actions_from_flow(content_json: str) -> list[dict[str, Any]]:
+    """Extract all Connect API actions from contact flow JSON content.
+
+    Parses the full Actions array from the flow definition and identifies
+    every API call that fires during a contact traversing this flow.
+    Each action type maps to specific Connect API calls.
+
+    Action Type → Connect API mapping:
+        InvokeLambdaFunction        → lambda:InvokeFunction
+        GetParticipantInput         → (Lex: RecognizeText/RecognizeUtterance)
+        InvokeFlowModule            → connect:DescribeContactFlowModule
+        TransferToFlow              → connect:StartContactStreaming (internal)
+        TransferContactToQueue      → connect:TransferContact
+        CreateTask                  → connect:CreateTask
+        UpdateContactAttributes     → connect:UpdateContactAttributes
+        CompareContactAttributes    → connect:DescribeContact + GetContactAttributes
+        InvokeExternalResource      → (Lex bot or external endpoint)
+        GetMetrics                  → connect:GetCurrentMetricData / GetMetricDataV2
+        CheckHoursOfOperation       → connect:DescribeHoursOfOperation
+        CheckContactAttributes      → connect:GetContactAttributes
+        SetContactAttributes        → connect:UpdateContactAttributes
+        SetVoice / SetLogging       → (internal, no API call)
+        PlayPrompt / GetInput       → (internal, no API call)
+        DisconnectParticipant       → connect:StopContact
+        TransferToPhoneNumber       → connect:StartOutboundVoiceContact
+        SetCallbackNumber           → connect:UpdateContactAttributes
+        CreateCallback              → connect:StartOutboundVoiceContact
+        TagContact                  → connect:TagContact
+        UntagContact                → connect:UntagContact
+        AssociateRoutingProfile     → connect:UpdateContactRoutingData
+        SetEventHook                → connect:UpdateContact
+        EndFlowExecution            → (internal, no API call)
+        Wait                        → (internal, no API call)
+        Loop                        → (internal, no API call)
+
+    Args:
+        content_json: Raw JSON string of the contact flow content.
+
+    Returns:
+        List of action dicts, each with:
+            type: The action type from the flow (e.g., "InvokeLambdaFunction")
+            api: The Connect/AWS API this maps to (e.g., "connect:UpdateContactAttributes")
+            parameters: Key parameters from the action (for context)
+            count: How many times this action type appears in the flow
+        Deduplicated by action type with count field.
+    """
+    if not content_json:
+        return []
+
+    try:
+        content = json.loads(content_json)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+    # Map Connect flow action types to the API calls they generate
+    ACTION_TO_API: dict[str, str] = {
+        "InvokeLambdaFunction": "lambda:InvokeFunction",
+        "GetParticipantInput": "lex:RecognizeText",
+        "InvokeFlowModule": "connect:DescribeContactFlowModule",
+        "TransferToFlow": "connect:StartContactStreaming",
+        "TransferContactToQueue": "connect:TransferContact",
+        "CreateTask": "connect:CreateTask",
+        "UpdateContactAttributes": "connect:UpdateContactAttributes",
+        "CompareContactAttributes": "connect:GetContactAttributes",
+        "CheckContactAttributes": "connect:GetContactAttributes",
+        "SetContactAttributes": "connect:UpdateContactAttributes",
+        "InvokeExternalResource": "lex:RecognizeUtterance",
+        "GetMetrics": "connect:GetCurrentMetricData",
+        "CheckHoursOfOperation": "connect:DescribeHoursOfOperation",
+        "CheckStaffing": "connect:GetCurrentMetricData",
+        "CheckQueueStatus": "connect:GetCurrentMetricData",
+        "DisconnectParticipant": "connect:StopContact",
+        "TransferToPhoneNumber": "connect:StartOutboundVoiceContact",
+        "CreateCallback": "connect:StartOutboundVoiceContact",
+        "SetCallbackNumber": "connect:UpdateContactAttributes",
+        "TagContact": "connect:TagContact",
+        "UntagContact": "connect:UntagContact",
+        "AssociateRoutingProfile": "connect:UpdateContactRoutingData",
+        "SetEventHook": "connect:UpdateContact",
+        "SendEvent": "connect:SendEvent",
+        "GetInput": "connect:GetContactAttributes",
+        "StoreInput": "connect:UpdateContactAttributes",
+        "SearchContacts": "connect:SearchContacts",
+        "DescribeContact": "connect:DescribeContact",
+        "CreateContact": "connect:StartChatContact",
+        "PauseContact": "connect:PauseContact",
+        "ResumeContact": "connect:ResumeContact",
+        # Internal actions (no API call):
+        "PlayPrompt": None,
+        "SetVoice": None,
+        "SetLogging": None,
+        "SetRecordingBehavior": None,
+        "SetAnalyticsBehavior": None,
+        "Wait": None,
+        "Loop": None,
+        "EndFlowExecution": None,
+        "SetWhisperFlow": None,
+        "SetHoldFlow": None,
+        "SetCustomerQueueFlow": None,
+        "SetDisconnectFlow": None,
+        "Distribute": None,
+    }
+
+    # Count actions by type
+    action_counts: dict[str, int] = defaultdict(int)
+    action_params: dict[str, dict[str, Any]] = {}
+
+    for action in content.get("Actions", []):
+        action_type = action.get("Type", "")
+        if not action_type:
+            continue
+
+        action_counts[action_type] += 1
+
+        # Store first occurrence's parameters for context
+        if action_type not in action_params:
+            params = action.get("Parameters", {})
+            action_params[action_type] = {
+                k: v for k, v in params.items()
+                if k not in ("Content",)  # Skip large content blobs
+            } if params else {}
+
+    # Build result list
+    results: list[dict[str, Any]] = []
+    for action_type, count in sorted(action_counts.items(), key=lambda x: -x[1]):
+        api = ACTION_TO_API.get(action_type, f"connect:{action_type}")
+        results.append({
+            "type": action_type,
+            "api": api,
+            "count": count,
+            "parameters": action_params.get(action_type, {}),
+        })
+
+    return results
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -870,6 +1012,17 @@ def main() -> None:
     parser.add_argument(
         "--verbose", "-v", action="store_true", help="Enable debug logging"
     )
+    parser.add_argument(
+        "--profile", default=None, help="AWS CLI profile name (default: environment default)"
+    )
+    parser.add_argument(
+        "--line-config", default=None,
+        help="Path to line-config.json for v4 operations dashboard (optional)"
+    )
+    parser.add_argument(
+        "--live-endpoint", default=None,
+        help="API Gateway URL for live CloudWatch refresh (from SAM deploy output)"
+    )
     args = parser.parse_args()
 
     # Configure logging
@@ -887,7 +1040,7 @@ def main() -> None:
     logger.info("  Output:   %s", args.output_dir)
     logger.info("=" * 60)
 
-    clients = create_clients(args.region)
+    clients = create_clients(args.region, args.profile)
 
     # ── Collect all layers ──
     numbers = collect_phone_numbers(clients["connect"], args.instance_id)
@@ -946,12 +1099,18 @@ def main() -> None:
 
     generate_dashboard(resource_map, model, dashboard_path)
 
+    # ── Consolidated API Report (always generated) ──
+    import consolidated_report
+    report_path = f"{args.output_dir}/connect-api-report.html"
+    consolidated_report.generate_consolidated_report(resource_map, model, report_path)
+
     # ── Summary ──
     logger.info("─" * 60)
     logger.info("Outputs:")
     logger.info("  %s", map_path)
     logger.info("  %s", model_path)
     logger.info("  %s  ← Open in browser", dashboard_path)
+    logger.info("  %s  ← Consolidated API Report", report_path)
     logger.info("─" * 60)
     logger.info("Summary:")
     logger.info("  Phone numbers: %d", model["summary"]["total_numbers"])
@@ -965,6 +1124,15 @@ def main() -> None:
         "  Quotas > 70%% utilized: %d", model["summary"]["quotas_above_70_pct"]
     )
     logger.info("=" * 60)
+
+    # ── V4 Operations Dashboard (if line config provided) ──
+    if args.line_config:
+        import dashboard_v4
+        with open(args.line_config, "r", encoding="utf-8") as f:
+            line_config = json.load(f)
+        v4_path = f"{args.output_dir}/connect-operations-dashboard.html"
+        dashboard_v4.generate_v4_dashboard(resource_map, model, line_config, v4_path, args.live_endpoint)
+        logger.info("  %s  ← V4 Operations Dashboard", v4_path)
 
 
 if __name__ == "__main__":
