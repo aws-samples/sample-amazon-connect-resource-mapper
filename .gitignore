@@ -6,3 +6,15 @@ test-output/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# SAM build artifacts
+live-refresh/.aws-sam/
+.aws-sam/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
